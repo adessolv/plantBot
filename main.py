@@ -36,6 +36,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
     persistent=True
 )
 
+
 # === FSM СОСТОЯНИЯ ===
 class FlowerBotStates(StatesGroup):
     waiting_for_location = State()
@@ -48,16 +49,22 @@ async def create_db_pool():
     return await asyncpg.create_pool(DATABASE_URL)
 
 
+async def save_flower_spot(pool, user_id, lat, lon, photo_id, description):
     async with pool.acquire() as conn:
         await conn.execute(
             """
+            insert into public.flower_spots (user_id, latitude, longitude, photo_id, description)
+            values ($1, $2, $3, $4, $5)
             """,
+            user_id, lat, lon, photo_id, description,
         )
 
 
+async def get_nearby_spots(pool, user_lat, user_lon, radius_km=1):  # ← 1 КМ!
     async with pool.acquire() as conn:
         spots = await conn.fetch(
             """
+            select latitude, longitude, photo_id, description, created_at
             from flower_spots
             where earth_box(ll_to_earth($1, $2), $3) @> ll_to_earth(latitude, longitude)
             order by earth_distance(ll_to_earth($1, $2), ll_to_earth(latitude, longitude))
@@ -108,6 +115,7 @@ async def main():
 
     @dp.message(FlowerBotStates.waiting_for_location, F.location)
     async def process_add_location(message: Message, state: FSMContext):
+        await state.update_data(lat=message.location.latitude, lon=message.location.longitude)
         await message.answer(
             "📸 Теперь пришли фото цветов (или `/skip` если фото нет):",
             reply_markup=ReplyKeyboardRemove(),
@@ -136,7 +144,9 @@ async def main():
         description = message.text.strip()
 
         pool = dp["db_pool"]
+        await save_flower_spot(pool, message.from_user.id, lat, lon, photo_id, description)
 
+        # ✅ ПРАВИЛЬНАЯ ссылка Google Maps
         google_maps = f"https://www.google.com/maps/search/?api=1&query={lat:.6f}%2C{lon:.6f}"
 
         text = (
@@ -182,13 +192,17 @@ async def main():
                 lat, lon = spot["latitude"], spot["longitude"]
                 desc = spot["description"] or "Красивые цветы"
 
+                # Текст с описанием
+                await message.answer(f"{i}. **{desc}**\n📍 `{lat:.6f}, {lon:.6f}`")
 
+                # Локация на карте
                 await message.bot.send_location(
                     chat_id=message.chat.id,
                     latitude=lat,
                     longitude=lon
                 )
 
+                # Фото если есть
                 if spot["photo_id"]:
                     await message.bot.send_photo(
                         chat_id=message.chat.id,
